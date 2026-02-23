@@ -1,0 +1,20 @@
+[project]
+name = "bourgade"
+version = "0.0.0-dev"
+description = "A RabbitMQ-based event bus for Python."
+authors = [
+  { name = "Anatoly Frolov (anafro)", email = "anatolyfroloff@gmail.com" },
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["pika (>=1.3.2,<2.0.0)", "reification (>=1.1.0,<2.0.0)"]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[virtualenvs]
+create = true
+in-project = true
