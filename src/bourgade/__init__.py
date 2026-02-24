@@ -185,7 +185,6 @@ class EventBus:
             channel.basic_nack(delivery_tag=delivery_tag)
 
 
-@dataclass
 class Event(ABC):
     """
     A base for all events.
