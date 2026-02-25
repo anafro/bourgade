@@ -141,10 +141,20 @@ class EventBus:
 
         :param Event event: The event to dispatch
         """
+        self.dispatch_raw(tag=event.get_event_name(), message_bytes=event.serialize())
+
+    def dispatch_raw(self, tag: str, message_bytes: bytes) -> None:
+        """
+        Dispatches a message with a tag, and bytes.
+        Use it to avoid using event abstractions for more complex logic.
+
+        :param str tag: The tag string for the message
+        :param bytes message_bytes: The message content
+        """
         self.channel.basic_publish(
             exchange=self.exchange_name,
-            routing_key=event.get_event_name(),
-            body=event.serialize(),
+            routing_key=tag,
+            body=message_bytes,
             mandatory=False,
         )
 
