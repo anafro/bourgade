@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import partial
 import logging
+from time import time
 from pika import BlockingConnection, ConnectionParameters, PlainCredentials
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.exchange_type import ExchangeType
@@ -10,6 +11,8 @@ from typing import Any, cast
 import json
 
 from reification import Reified
+
+from bourgade.utils.dicts import optional_entry
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -34,9 +37,7 @@ class EventHandler[E: Event = Event](ABC, Reified):
         """
         return cast(type[E], cls.targ)
 
-    def trigger(
-        self, event_bus: "EventBus", deliver: Basic.Deliver, message: bytes
-    ) -> None:
+    def trigger(self, event_bus: "EventBus", message: bytes) -> None:
         """
         Builds, and hydrates a new event object from RabbitMQ deliver,
         and triggers `handle` within this handler.
@@ -45,9 +46,10 @@ class EventHandler[E: Event = Event](ABC, Reified):
         :param Basic.Deliver deliver: The RabbitMQ deliver object considered to be an event for the handler
         :param bytes message: The RabbitMQ message bytes for event hydration
         """
-        event_class: type[E] = self.get_event_type()
-        event = event_class(event_bus, deliver=deliver, message=message)
-        event.hydrate()
+        ThisEvent: type[E] = self.get_event_type()
+        happened_at: int = int(time() * 1000)
+        event = ThisEvent(event_bus=event_bus, happened_at=happened_at)
+        event.hydrate(message=message)
         self.handle(event=event)
 
     @abstractmethod
@@ -189,48 +191,49 @@ class EventBus:
         event_handler: EventHandler[Event] = event_handlers[routing_key]
 
         try:
-            event_handler.trigger(event_bus=event_bus, deliver=deliver, message=message)
+            event_handler.trigger(event_bus=event_bus, message=message)
             channel.basic_ack(delivery_tag=delivery_tag)
         except Exception:
             channel.basic_nack(delivery_tag=delivery_tag)
 
 
-@dataclass
 class Event(ABC):
     """
-    A base for all events.
-    Create a new class, override all abstract methods,
-    and see the abstract methods docs.
+    Events in Bourgade are Json-based.
+    So to use Bourgade events, you must implement get/set contents of the object.
     """
 
     event_bus: EventBus
-    deliver: Basic.Deliver
-    message: bytes
+    happened_at: int
+    sid: str | None
+
+    def __init__(self, event_bus: EventBus, happened_at: int) -> None:
+        self.event_bus = event_bus
+        self.happened_at = happened_at
 
     @abstractmethod
-    def hydrate(self) -> None:
-        """
-        Fills the event with data received from RabbitMQ.
-        Depending on the format you chose for the event,
-        use `string()`, `json()` methods, and map data from the message
-        into the class fields you defined.
-
-        E.g. you have an event `user.created` with user info, for example id, and name.
-        If you decided to use JSON as an event format, call `body = self.json()`,
-        and pass `self.id = int(body.id)`, `self.name = str(body.name)`.
-        So in handlers, you could access fields like `event.id`, or `event.name`.
-        """
-        ...
+    def get_content_as_dict(self) -> dict[str, Any]: ...
 
     @abstractmethod
+    def set_content_from_dict(self, content: dict[str, Any]) -> None: ...
+
+    def hydrate(self, message: bytes) -> None:
+        payload: dict[str, Any] = json.loads(message)
+        header: dict[str, Any] = payload["header"]
+        content: dict[str, Any] = payload["content"]
+        self.sid = header["sid"]
+        self.set_content_from_dict(content=content)
+
     def serialize(self) -> bytes:
-        """
-        Serializes the field back bytes.
-        This method is the opposide of `hydrate`.
-
-        :returns bytes: The serialized event as RabbitMQ message bytes
-        """
-        ...
+        return json.dumps(
+            {
+                "header": {
+                    "happenedAt": self.happened_at,
+                    **optional_entry("sid", self.sid),
+                },
+                "content": self.get_content_as_dict(),
+            }
+        ).encode("utf-8")
 
     @staticmethod
     @abstractmethod
@@ -243,19 +246,3 @@ class Event(ABC):
         :returns str: The event name
         """
         ...
-
-    def string(self) -> str:
-        """
-        Decodes RabbitMQ message as a UTF-8 string.
-
-        :returns str: A message as a string
-        """
-        return self.message.decode(encoding="utf-8")
-
-    def json(self) -> dict[str, Any]:
-        """
-        Decodes RabbitMQ message as a JSON payload.
-
-        :returns dict[str, Any]: A message as a JSON payload
-        """
-        return json.loads(self.string())
