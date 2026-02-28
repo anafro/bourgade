@@ -1,19 +1,18 @@
+import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import partial
-import logging
 from time import time
+from typing import Any, cast
+
 from pika import BlockingConnection, ConnectionParameters, PlainCredentials
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.exchange_type import ExchangeType
 from pika.spec import Basic, BasicProperties
-from typing import Any, cast
-import json
-
 from reification import Reified
 
 from bourgade.utils.dicts import optional_entry
-
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -246,3 +245,10 @@ class Event(ABC):
         :returns str: The event name
         """
         ...
+
+    @classmethod
+    def create(cls, event_bus: EventBus, content: dict[str, Any]) -> "Event":
+        happened_at: int = int(time() * 1000)
+        event = cls(event_bus=event_bus, happened_at=happened_at)
+        event.set_content_from_dict(content=content)
+        return event
