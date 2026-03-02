@@ -1,6 +1,6 @@
 [project]
 name = "bourgade"
-version = "0.1.2"
+version = "0.1.3"
 description = "A RabbitMQ-based event bus for Python."
 authors = [
   { name = "Anatoly Frolov (anafro)", email = "anatolyfroloff@gmail.com" },

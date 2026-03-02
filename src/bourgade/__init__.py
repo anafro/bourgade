@@ -179,7 +179,8 @@ class EventBus:
         :param str tag: The tag string for the message
         :param bytes message_bytes: The message content
         """
-        logger.info("[SEND] {}", tag)
+
+        logger.info("[SEND] %s", tag)
         self.channel.basic_publish(
             exchange=self.exchange_name,
             routing_key=tag,
@@ -213,7 +214,7 @@ class EventBus:
         delivery_tag: int = cast(int, deliver.delivery_tag)
         routing_key: str = cast(str, deliver.routing_key)
 
-        logger.info("[RECV] {}", routing_key)
+        logger.info("[RECV] %s", routing_key)
 
         try:
             if routing_key in event_handlers:
