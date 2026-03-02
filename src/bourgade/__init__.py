@@ -1,10 +1,9 @@
 import json
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from functools import partial
 from time import time, sleep
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from pika import BlockingConnection, ConnectionParameters, PlainCredentials
 from pika.adapters.blocking_connection import BlockingChannel
@@ -16,6 +15,10 @@ from reification import Reified
 from bourgade.utils.dicts import optional_entry
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+class AllCatchEventHandler(Protocol):
+    def __call__(self, event_name: str, message_bytes: bytes) -> None: ...
 
 
 class EventHandler[E: Event = Event](ABC, Reified):
@@ -69,6 +72,7 @@ class EventBus:
     and manages RabbitMQ messages, passing them to handlers.
     """
 
+    all_catch_event_handler: AllCatchEventHandler | None
     event_handlers: dict[str, EventHandler["Event"]]
     connection: BlockingConnection
     channel: BlockingChannel
@@ -118,6 +122,7 @@ class EventBus:
                     auto_delete=False,
                 )
                 self.channel.queue_declare(queue=queue_name, auto_delete=True)
+                self.all_catch_event_handler = None
                 self.event_handlers = {}
                 return
             except AMQPConnectionError:
@@ -133,9 +138,15 @@ class EventBus:
         :param EventHandler[E] event_handler: The event handler to register
         """
         event_type: type[Event] = cast(type[Event], event_handler.targ)
+
         self.event_handlers[event_type.get_event_name()] = cast(
             EventHandler[Event], event_handler
         )
+
+    def set_all_catch_handler(
+        self, all_catch_event_handler: AllCatchEventHandler
+    ) -> None:
+        self.all_catch_event_handler = all_catch_event_handler
 
     def start_listening(self) -> None:
         """
@@ -175,6 +186,7 @@ class EventBus:
     @staticmethod
     def __consume(
         event_bus: "EventBus",
+        all_catch_event_handler: AllCatchEventHandler | None,
         event_handlers: dict[str, EventHandler["Event"]],
         channel: BlockingChannel,
         deliver: Basic.Deliver,
@@ -197,16 +209,21 @@ class EventBus:
         delivery_tag: int = cast(int, deliver.delivery_tag)
         routing_key: str = cast(str, deliver.routing_key)
 
-        if routing_key not in event_handlers:
-            raise ValueError(f"There is no event handler for '{routing_key}'.")
-
-        event_handler: EventHandler[Event] = event_handlers[routing_key]
-
         try:
-            event_handler.trigger(event_bus=event_bus, message=message)
+            if routing_key in event_handlers:
+                event_handler: EventHandler[Event] = event_handlers[routing_key]
+                event_handler.trigger(event_bus=event_bus, message=message)
+            elif all_catch_event_handler is not None:
+                all_catch_event_handler(event_name=routing_key, message_bytes=message)
+            else:
+                raise ValueError(f"There is no event handler for '{routing_key}'.")
+
             channel.basic_ack(delivery_tag=delivery_tag)
-        except Exception:
+        except Exception as exception:
             channel.basic_nack(delivery_tag=delivery_tag)
+            logger.error(
+                msg="Event is NACK because of an exception.", exc_info=exception
+            )
 
 
 class Event(ABC):
