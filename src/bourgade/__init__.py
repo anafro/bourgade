@@ -119,8 +119,11 @@ class EventBus:
                 )
                 self.channel.queue_declare(queue=queue_name, auto_delete=True)
                 self.event_handlers = {}
+                return
             except AMQPConnectionError:
                 sleep(connection_retry_interval)
+
+        raise ValueError("Bourgade connection to RMQ failed after several retries.")
 
     def register_handler[E: Event](self, event_handler: EventHandler[E]) -> None:
         """
