@@ -3,13 +3,14 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import partial
-from time import time
+from time import time, sleep
 from typing import Any, cast
 
 from pika import BlockingConnection, ConnectionParameters, PlainCredentials
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.exchange_type import ExchangeType
 from pika.spec import Basic, BasicProperties
+from pika.exceptions import AMQPConnectionError
 from reification import Reified
 
 from bourgade.utils.dicts import optional_entry
@@ -81,6 +82,10 @@ class EventBus:
         password: str,
         exchange_name: str,
         queue_name: str,
+        *,
+        connection_delay: int = 0,
+        connection_retries: int = 10,
+        connection_retry_interval: int = 3,
     ) -> None:
         """
         Creates a new event bus.
@@ -91,26 +96,31 @@ class EventBus:
         :param str exchange_name: The RabbitMQ exchange name containing events across the infrastructure
         :param str host: The RabbitMQ queue name consuming events within the app
         """
-        connection_credentials: PlainCredentials = PlainCredentials(
-            username=username, password=password
-        )
-        connection_parameters: ConnectionParameters = ConnectionParameters(
-            host=host, port=5672, credentials=connection_credentials
-        )
-        self.exchange_name = exchange_name
-        self.queue_name = queue_name
-        self.connection = BlockingConnection(parameters=connection_parameters)
-        self.channel = self.connection.channel()
-        self.channel.basic_qos(prefetch_count=1)
-        self.channel.exchange_declare(
-            exchange=exchange_name,
-            exchange_type=ExchangeType.topic,
-            passive=False,
-            durable=True,
-            auto_delete=False,
-        )
-        self.channel.queue_declare(queue=queue_name, auto_delete=True)
-        self.event_handlers = {}
+        sleep(connection_delay)
+        while (connection_retries := connection_retries - 1) > 0:
+            try:
+                connection_credentials: PlainCredentials = PlainCredentials(
+                    username=username, password=password
+                )
+                connection_parameters: ConnectionParameters = ConnectionParameters(
+                    host=host, port=5672, credentials=connection_credentials
+                )
+                self.exchange_name = exchange_name
+                self.queue_name = queue_name
+                self.connection = BlockingConnection(parameters=connection_parameters)
+                self.channel = self.connection.channel()
+                self.channel.basic_qos(prefetch_count=1)
+                self.channel.exchange_declare(
+                    exchange=exchange_name,
+                    exchange_type=ExchangeType.topic,
+                    passive=False,
+                    durable=True,
+                    auto_delete=False,
+                )
+                self.channel.queue_declare(queue=queue_name, auto_delete=True)
+                self.event_handlers = {}
+            except AMQPConnectionError:
+                sleep(connection_retry_interval)
 
     def register_handler[E: Event](self, event_handler: EventHandler[E]) -> None:
         """
