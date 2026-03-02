@@ -157,6 +157,9 @@ class EventBus:
             queue=self.queue_name,
             on_message_callback=partial(self.__consume, event_bus=self),
         )
+        self.channel.queue_bind(
+            queue=self.queue_name, exchange=self.exchange_name, routing_key="*"
+        )
         logger.info("Bourgade is listening for events...")
         self.channel.start_consuming()
 
