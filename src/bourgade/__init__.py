@@ -1,15 +1,19 @@
+import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
-from functools import partial
 from time import time, sleep
 from typing import Any, Protocol, cast
 
-from pika import BlockingConnection, ConnectionParameters, PlainCredentials
-from pika.adapters.blocking_connection import BlockingChannel
-from pika.exchange_type import ExchangeType
-from pika.spec import Basic, BasicProperties
-from pika.exceptions import AMQPConnectionError
+from aio_pika import ExchangeType, Message, connect_robust
+from aio_pika.abc import (
+    AbstractConnection,
+    AbstractExchange,
+    AbstractMessage,
+    AbstractQueue,
+    AbstractChannel,
+    AbstractIncomingMessage,
+)
 from reification import Reified
 
 from bourgade.utils.dicts import optional_entry
@@ -74,12 +78,12 @@ class EventBus:
 
     all_catch_event_handler: AllCatchEventHandler | None
     event_handlers: dict[str, EventHandler["Event"]]
-    connection: BlockingConnection
-    channel: BlockingChannel
-    exchange_name: str
-    queue_name: str
+    connection: AbstractConnection
+    channel: AbstractChannel
+    exchange: AbstractExchange
+    queue: AbstractQueue
 
-    def __init__(
+    async def __init__(
         self,
         host: str,
         username: str,
@@ -100,35 +104,32 @@ class EventBus:
         :param str exchange_name: The RabbitMQ exchange name containing events across the infrastructure
         :param str host: The RabbitMQ queue name consuming events within the app
         """
-        sleep(connection_delay)
+        await asyncio.sleep(connection_delay)
         while (connection_retries := connection_retries - 1) > 0:
             try:
-                connection_credentials: PlainCredentials = PlainCredentials(
-                    username=username, password=password
+                self.connection = await connect_robust(
+                    host=host, login=username, password=password
                 )
-                connection_parameters: ConnectionParameters = ConnectionParameters(
-                    host=host, port=5672, credentials=connection_credentials
-                )
-                self.exchange_name = exchange_name
-                self.queue_name = queue_name
-                self.connection = BlockingConnection(parameters=connection_parameters)
-                self.channel = self.connection.channel()
-                self.channel.basic_qos(prefetch_count=1)
-                self.channel.exchange_declare(
-                    exchange=exchange_name,
-                    exchange_type=ExchangeType.topic,
+                self.channel = await self.connection.channel()
+                _ = await self.channel.set_qos(prefetch_count=1)
+                self.exchange = await self.channel.declare_exchange(
+                    name=exchange_name,
+                    type=ExchangeType.TOPIC,
                     passive=False,
                     durable=True,
                     auto_delete=False,
                 )
-                self.channel.queue_declare(queue=queue_name, auto_delete=True)
+                self.queue = await self.channel.declare_queue(
+                    name=queue_name, auto_delete=True
+                )
                 self.all_catch_event_handler = None
                 self.event_handlers = {}
                 return
-            except AMQPConnectionError:
-                sleep(connection_retry_interval)
-
-        raise ValueError("Bourgade connection to RMQ failed after several retries.")
+            except Exception as connection_exception:
+                await asyncio.sleep(connection_retry_interval)
+                raise ValueError(
+                    "Bourgade connection to RMQ failed after several retries."
+                ) from connection_exception
 
     def register_handler[E: Event](self, event_handler: EventHandler[E]) -> None:
         """
@@ -148,30 +149,35 @@ class EventBus:
     ) -> None:
         self.all_catch_event_handler = all_catch_event_handler
 
-    def start_listening(self) -> None:
+    async def start_listening(self) -> None:
         """
         Starts listening for RabbitMQ messages.
         This method is blocking.
         """
-        self.channel.basic_consume(
-            queue=self.queue_name,
-            on_message_callback=partial(self.__consume, event_bus=self),
-        )
-        self.channel.queue_bind(
-            queue=self.queue_name, exchange=self.exchange_name, routing_key="*"
-        )
+        _ = await self.queue.bind(exchange=self.exchange, routing_key="*")
         logger.info("Bourgade is listening for events...")
-        self.channel.start_consuming()
+        async with self.queue.iterator() as queue_iterator:
+            async for amqp_message in queue_iterator:
+                async with amqp_message.process():
+                    await self.__consume(amqp_message=amqp_message)
 
-    def dispatch(self, event: "Event") -> None:
+    async def dispatch(self, event: "Event") -> None:
         """
         Dispatches an event to RabbitMQ exchange.
 
         :param Event event: The event to dispatch
         """
-        self.dispatch_raw(tag=event.get_event_name(), message_bytes=event.serialize())
+        await self.dispatch_raw(
+            tag=event.get_event_name(), message_bytes=event.serialize()
+        )
 
-    def dispatch_raw(self, tag: str, message_bytes: bytes) -> None:
+    async def dispatch_raw(
+        self,
+        tag: str,
+        message_bytes: bytes,
+        content_type: str = "application/json",
+        content_encoding: str = "utf-8",
+    ) -> None:
         """
         Dispatches a message with a tag, and bytes.
         Use it to avoid using event abstractions for more complex logic.
@@ -181,22 +187,20 @@ class EventBus:
         """
 
         logger.info("[SEND] %s", tag)
-        self.channel.basic_publish(
-            exchange=self.exchange_name,
-            routing_key=tag,
+        amqp_message: AbstractMessage = Message(
             body=message_bytes,
+            content_type=content_type,
+            content_encoding=content_encoding,
+        )
+        _ = await self.exchange.publish(
+            message=amqp_message,
+            routing_key=tag,
             mandatory=False,
         )
 
-    @staticmethod
-    def __consume(
-        event_bus: "EventBus",
-        all_catch_event_handler: AllCatchEventHandler | None,
-        event_handlers: dict[str, EventHandler["Event"]],
-        channel: BlockingChannel,
-        deliver: Basic.Deliver,
-        _: BasicProperties,
-        message: bytes,
+    async def __consume(
+        self,
+        amqp_message: AbstractIncomingMessage,
     ) -> None:
         """
         Consumes a RabbitMQ message,
@@ -211,23 +215,28 @@ class EventBus:
         :param BasicProperties _: The RabbitMQ properties, unused here
         :param bytes message: The message body
         """
-        delivery_tag: int = cast(int, deliver.delivery_tag)
-        routing_key: str = cast(str, deliver.routing_key)
+        routing_key: str | None = amqp_message.routing_key
+        message: bytes = amqp_message.body
+
+        if routing_key is None:
+            raise ValueError("Consumed message does not have a routing key.")
 
         logger.info("[RECV] %s", routing_key)
 
         try:
-            if routing_key in event_handlers:
-                event_handler: EventHandler[Event] = event_handlers[routing_key]
-                event_handler.trigger(event_bus=event_bus, message=message)
-            elif all_catch_event_handler is not None:
-                all_catch_event_handler(event_name=routing_key, message_bytes=message)
+            if routing_key in self.event_handlers:
+                event_handler: EventHandler[Event] = self.event_handlers[routing_key]
+                event_handler.trigger(event_bus=self, message=message)
+            elif self.all_catch_event_handler is not None:
+                self.all_catch_event_handler(
+                    event_name=routing_key, message_bytes=message
+                )
             else:
                 raise ValueError(f"There is no event handler for '{routing_key}'.")
 
-            channel.basic_ack(delivery_tag=delivery_tag)
+            await amqp_message.ack()
         except Exception as exception:
-            channel.basic_nack(delivery_tag=delivery_tag)
+            await amqp_message.nack()
             logger.error(
                 msg="Event is NACK because of an exception.", exc_info=exception
             )
