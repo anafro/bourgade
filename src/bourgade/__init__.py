@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
-from time import time, sleep
+from time import time
 from typing import Any, Protocol, cast
 
 from aio_pika import ExchangeType, Message, connect_robust
@@ -44,7 +44,7 @@ class EventHandler[E: Event = Event](ABC, Reified):
         """
         return cast(type[E], cls.targ)
 
-    def trigger(self, event_bus: "EventBus", message: bytes) -> None:
+    async def trigger(self, event_bus: "EventBus", message: bytes) -> None:
         """
         Builds, and hydrates a new event object from RabbitMQ deliver,
         and triggers `handle` within this handler.
@@ -57,10 +57,10 @@ class EventHandler[E: Event = Event](ABC, Reified):
         happened_at: int = int(time() * 1000)
         event = ThisEvent(event_bus=event_bus, happened_at=happened_at)
         event.hydrate(message=message)
-        self.handle(event=event)
+        await self.handle(event=event)
 
     @abstractmethod
-    def handle(self, event: E) -> None:
+    async def handle(self, event: E) -> None:
         """
         Handles the event when triggered.
         Override this method to define handling logic.
@@ -226,7 +226,7 @@ class EventBus:
         try:
             if routing_key in self.event_handlers:
                 event_handler: EventHandler[Event] = self.event_handlers[routing_key]
-                event_handler.trigger(event_bus=self, message=message)
+                await event_handler.trigger(event_bus=self, message=message)
             elif self.all_catch_event_handler is not None:
                 self.all_catch_event_handler(
                     event_name=routing_key, message_bytes=message
