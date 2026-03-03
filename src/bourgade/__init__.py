@@ -1,18 +1,21 @@
 import asyncio
 import json
 import logging
+import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from time import time
 from typing import Any, Protocol, cast
 
 from aio_pika import ExchangeType, Message, connect_robust
 from aio_pika.abc import (
+    AbstractChannel,
     AbstractConnection,
     AbstractExchange,
+    AbstractIncomingMessage,
     AbstractMessage,
     AbstractQueue,
-    AbstractChannel,
-    AbstractIncomingMessage,
+    AbstractRobustConnection,
 )
 from reification import Reified
 
@@ -70,6 +73,7 @@ class EventHandler[E: Event = Event](ABC, Reified):
         ...
 
 
+@dataclass
 class EventBus:
     """
     Connects to RabbitMQ, declares its abstractions,
@@ -83,8 +87,8 @@ class EventBus:
     exchange: AbstractExchange
     queue: AbstractQueue
 
-    async def __init__(
-        self,
+    @staticmethod
+    async def create(
         host: str,
         username: str,
         password: str,
@@ -94,7 +98,7 @@ class EventBus:
         connection_delay: int = 0,
         connection_retries: int = 10,
         connection_retry_interval: int = 3,
-    ) -> None:
+    ) -> "EventBus":
         """
         Creates a new event bus.
 
@@ -107,29 +111,36 @@ class EventBus:
         await asyncio.sleep(connection_delay)
         while (connection_retries := connection_retries - 1) > 0:
             try:
-                self.connection = await connect_robust(
+                connection: AbstractRobustConnection = await connect_robust(
                     host=host, login=username, password=password
                 )
-                self.channel = await self.connection.channel()
-                _ = await self.channel.set_qos(prefetch_count=1)
-                self.exchange = await self.channel.declare_exchange(
+                channel: AbstractChannel = await connection.channel()
+                _ = await channel.set_qos(prefetch_count=1)
+                exchange: AbstractExchange = await channel.declare_exchange(
                     name=exchange_name,
                     type=ExchangeType.TOPIC,
                     passive=False,
                     durable=True,
                     auto_delete=False,
                 )
-                self.queue = await self.channel.declare_queue(
+                queue: AbstractQueue = await channel.declare_queue(
                     name=queue_name, auto_delete=True
                 )
-                self.all_catch_event_handler = None
-                self.event_handlers = {}
-                return
-            except Exception as connection_exception:
+
+                return EventBus(
+                    event_handlers={},
+                    all_catch_event_handler=None,
+                    connection=connection,
+                    channel=channel,
+                    exchange=exchange,
+                    queue=queue,
+                )
+            except Exception:
                 await asyncio.sleep(connection_retry_interval)
-                raise ValueError(
-                    "Bourgade connection to RMQ failed after several retries."
-                ) from connection_exception
+
+        raise ValueError(
+            "Bourgade connection to RMQ failed after several retries."
+        ) from sys.last_exc
 
     def register_handler[E: Event](self, event_handler: EventHandler[E]) -> None:
         """
