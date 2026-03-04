@@ -165,7 +165,14 @@ class EventBus:
         Starts listening for RabbitMQ messages.
         This method is blocking.
         """
-        _ = await self.queue.bind(exchange=self.exchange, routing_key="#")
+        if self.all_catch_event_handler is None:
+            for event_handler in self.event_handlers.values():
+                event_name: str = event_handler.get_event_type().get_event_name()
+                _ = await self.queue.bind(
+                    exchange=self.exchange, routing_key=event_name
+                )
+        else:
+            _ = await self.queue.bind(exchange=self.exchange, routing_key="#")
         logger.info("Bourgade is listening for events...")
         async with self.queue.iterator() as queue_iterator:
             async for amqp_message in queue_iterator:
