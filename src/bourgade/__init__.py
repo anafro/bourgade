@@ -251,10 +251,7 @@ class EventBus:
                 )
             else:
                 raise ValueError(f"There is no event handler for '{routing_key}'.")
-
-            await amqp_message.ack()
         except Exception as exception:
-            await amqp_message.nack()
             logger.error(
                 msg="Event is NACK because of an exception.", exc_info=exception
             )
