@@ -266,6 +266,7 @@ class Event(ABC):
     def __init__(self, event_bus: EventBus, happened_at: int) -> None:
         self.event_bus = event_bus
         self.happened_at = happened_at
+        self.sid = None
 
     @abstractmethod
     def get_content_as_dict(self) -> dict[str, Any]: ...
