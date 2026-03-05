@@ -282,7 +282,7 @@ class Event(ABC):
         payload: dict[str, Any] = json.loads(message)
         header: dict[str, Any] = payload["header"]
         content: dict[str, Any] = payload["content"]
-        self.sid = header["sid"]
+        self.sid = header.get("sid")
         self.set_content_from_dict(content=content)
 
     def serialize(self) -> bytes:
